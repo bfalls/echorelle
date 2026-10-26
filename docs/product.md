@@ -1,0 +1,60 @@
+# Product contract and remaining work
+
+Latest addition — 0.3.2: Stained glass is now implemented, superseding its earlier deferral. Three original classic-style artworks adapt from Magnolia through Iris garden to River of light. Arrivals average 2.5 seconds; short intervals group panes, long ones subdivide regions. Very faint moving haze stays around the artwork; finished light fills the window. Under-five artwork remains static and reduced motion suppresses flights/haze drift. See [stained glass](stained-glass.md). Existing saved choices remain intact. The user rejected the current origami appearance as flat with disappearing folds; prior geometry tests do not establish visual acceptance.
+
+Latest origami requirement — 0.3.0 supersedes the fallback bird and all earlier exceptions: one regular, uncut connected sheet, with no added/detached material or target morphs. Execute one physical fold operation at a time. Current projects are a square-sheet dart (9 operations), traditional samurai helmet (14), and original radial fan (189, including real crease/open preparation), chosen from interval duration. Every operation uses observed whole-interval audio phase; under-five-second artwork stays static. See [sequential origami](sequential-origami.md) for exact thresholds, references, validation and zero-thickness/pocket-handling limitations. Miura, the unsuccessful pleated-leaf candidate and Hydrangea are not current visuals.
+
+
+Future visuals: the user asked to save Stained Glass, Kintsugi Bowl, Miniature Observatory, Wooden Puzzle, Sand Garden and Marquetry for later consideration. See [animation ideas](animation-ideas.md); do not implement them as part of the current cube/runtime work.
+
+Latest runtime direction: every cube interval gets a fresh seeded reversible scramble, with one quarter-turn per second during the solving portion and the existing final solved-face display. Screen-off/hidden visuals must do no drawing or preparation and must seek the current pose on return. Preserve precise audio intervals; measure and reduce power without requesting special alarm access. Near-zero power during silent playing gaps has not been demonstrated.
+
+Latest origami decision — 0.2.8: remove Miura. The user reported apparently motionless paper at 1,265 seconds and rejected the form as boring with an unsatisfying endpoint. Origami temporarily uses the approved simple bird for all durations, starting flat and completing over the observed whole interval. This does not fulfill the richer long-duration folding requirement. Hydrangea remains unimplemented. Older Miura requirements below are historical and superseded.
+
+Latest scope — 0.2.6 supersedes older six-style lists below: offer only Origami and Cube. Migrate removed visual preferences to Origami while preserving jobs/imports. Cube adapts from 3×3 to 4×4 at 20 minutes and 5×5 at one hour, using legal inner/outer layer turns. Solve up to five seconds early, show the solved faces with whole-cube rotations, then return to the starting view by interval completion; reserve half the interval on 5–10-second jobs. Under five seconds stays static, and reduced motion uses stationary progress/solved poses. All animation observes audio phase. See [cube behavior](cube-animation.md). Hydrangea is researched but not shipped: faithful coupled folding geometry is still missing. The five removed renderers must not return through historical instructions.
+
+
+0.2.4 correction supersedes the complex-bird approvals below: retain the short stylized bird, but use an authentic single-sheet Miura-ori paper relief for intervals of 30 seconds or longer. Its completion parameter spans the entire chosen interval, including 1,500 seconds. The chooser now says Origami; the persisted selection key remains `BIRD`. No fixed-seconds opening or invented finned bird for long jobs. See [origami sources, derivation and limits](origami-references.md).
+
+Latest Paper Bird correction (0.2.3): the user approved the textured bird appearance; begin as a flat, uncreased square before gathering into the existing fold sequence. Retain finished bird shapes and duration-adaptive complexity. Intervals under five seconds remain static. See the latest build handoff for actual validation.
+
+Latest visual direction: [Animation art and motion contract](animation-motion-contract.md). The user rejected the 0.2.1 artwork as elementary. Duration adaptation must change meaningful construction complexity, potentially including the finished bird model itself; repeated fine motion over a stretched simple transformation is insufficient. The older implementation descriptions below are historical, not visual-quality acceptance.
+
+0.2.2 replaces Paper Bird's flat polygon/fan lines with shaded, textured hinged paper faces and increasing wing/tail complexity. Other styles have not received this material/artwork revision. Latest threshold: all interval artwork stays static below five seconds; five seconds and above animate. This overrides the earlier sub-second continuous-texture behavior. Review artifacts and actual validation are recorded in `build-handoff.md` and `review.md`; aesthetic acceptance remains the user's judgment.
+
+Source: the four Obsidian planning notes read on 2026-10-24 (Start Here, Product and Build Plan, Animation Concepts, Build Session Handoff), updated by the user's 2026-10-25 build decision. Full Android development is now authorized using the successful short physical-phone checks. Extended, self-reporting soak/energy testing moves to the real app and must not block implementation. No long-duration reliability pass is claimed. iOS and Mac work remain deferred. See `build-handoff.md` for engineering guidance and current state.
+
+Implement saved local jobs with explicit timing (no default interval), immediate Start, pause/resume preserving clip and cycle phase, Stop resetting both, Delete with brief Undo restoring stopped, Stop All, and clear interrupted/error states. Reopening the UI attaches to the engine. Saving does not start. Stop a job before editing timing or replacing audio. Restore definitions stopped after crash, termination, force-stop, or reboot and explain why. No accounts, backend, arbitrary executable jobs, or automatic restart promises.
+
+Use exact decoded frame counts for duration and eligibility, including codec delay/padding handling. Sounds exceeding a chosen interval stay visible but disabled with a reason. Shortening an interval revalidates immediately and disables Save/Start if incompatible. Equal durations use exact looping. Match derives the interval from the chosen file; disabling Match retains that derived value as the editable interval. Copy imports locally and finish decoding before permitting playback; unsupported/unknown durations remain ineligible. Add explicit one-shot preview controls that stop on leaving the editor, seam preview, and optional duration-preserving seam softening. Never autoplay a picker or truncate invalid audio.
+
+Retain all five named sound choices with descriptions and complete actual durations. Soft Ding is the gentle default sound, never a default interval. Loud Alarm Buzz is deliberately harsh, never default, and uses ordinary volume controls. Add per-job volume and headroom/limiting. Four concurrent jobs remains proposed until device validation confirms it.
+
+Home has Add, running-dependent Stop All, and a visible Visual button. Visual opens a two-column, three-row preview sheet. One additional tap applies globally, persists immediately, and dismisses. No Settings detour or Save. All six styles are required:
+
+| Style | Interval | Onset |
+| --- | --- | --- |
+| The Loom (default) | Loose strands gather into a knot | Knot tightens, plucks, releases |
+| Paper Bird | Sheet folds toward an origami bird | Wings open, sheet unfolds |
+| Magnetic Garden | Metallic seeds form a sculptural flower | Flower aligns, shivers, scatters |
+| Ink Creature | Ink shape gathers toward a hop | Hop leaves a fading dot |
+| Constellation | Points drift into geometry | Connections gently appear, loosen |
+| Paper Landscape | Folded valley becomes a peak | Crease flips into next form |
+
+Animation reads existing engine phase; changing styles never changes audio or phase. Freeze paused visuals, relax stopped ones, render only visible cards, and use steady texture for short loops. Honor reduced-motion preferences with static alternatives and clear countdown/state text. Chooser demonstrations are silent and stop on dismissal. Large-text layouts scroll; TalkBack gets control names, selected style, and state changes without second-by-second announcements. Never use color alone or flashing.
+
+The feasibility probe now provides explicit one-shot previews for all five generated tones, a fixed status/countdown/control footer, and a form that locks while the test is active. It requires Stop before changing sound or timing. Preview is separate from selection, works with blank timing, ends automatically, and stops when leaving the screen.
+
+Still unimplemented beyond the feasibility probe: persistence/editor, imported decoding/cache and measured import limits, independent job lifecycle and Undo, all six visuals/chooser, accessibility validation, full Media3 integration assessment, physical-device reliability/energy matrix, and release packaging. The probe APK must not be presented as completion of this product contract.
+
+## Implementation update — 0.2.0
+
+Saved-job persistence/editor/imports/independent lifecycle/Undo, all six visuals and the direct chooser are now implemented; the earlier "still unimplemented" paragraph above describes the historical probe state. Exact frame-count regression fixtures, independent service/focus/cap tests, lifecycle-aware UI and a versioned atomic local document are present. See `review.md` for actual validation and `audio-behavior.md` for import limits and native media-session rationale. Wider physical reliability/energy, audible capture, real route/call behavior and human accessibility review remain validation work rather than a reason to rebuild the probe.
+
+## Interval progress clarification — 0.2.1
+
+The user's clarification supersedes the earlier nearly static phase poses: every visual is a beginning-to-end representation of the entire interval. A five-second interval completes one whole form in five seconds; the same whole-form completion spans a minute, twenty minutes or two hours when selected. Longer durations add fine work passes of at most eight seconds so visible activity does not disappear during an hour-scale transformation. The Loom accumulates woven cloth while its shuttle works the current edge; Bird accumulates folds, Garden gathers seeds into petals, Ink fills its creature, Constellation draws its connections and Landscape builds its ridges. Completed structure represents whole-interval progress; working detail represents the smaller duration-adapted passes. These are visual projections of audio phase, not independent audio timers.
+
+The service now timestamps its immutable observations with the monotonic audio-observation clock. Canvas redraws at display refresh rate and interpolates at most 150ms beyond the latest observation, rather than jumping at the 100ms snapshot rate. It stops predicting if observations stall. Pause/interruption freezes the drawing; stopped jobs return to their initial form. Switching styles reads the current phase. Reduced motion uses static progress poses; sub-second loops retain a calm continuous texture to avoid rapid repeated fills. Animation allocation/drawing remains on the UI side, outside the audio render path.
+
+Product screens must contain no project status or testing commentary. The provisional/reliability footer and routine restart-status paragraph were removed. Decoded-frame/cache/engine commentary was removed from normal import/editor screens, including old imported metadata displayed by the picker. Useful state, explicit controls, duration eligibility and actionable errors remain. Development evidence belongs in this repository, never in Grandma's everyday product flow.

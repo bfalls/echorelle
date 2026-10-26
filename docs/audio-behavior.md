@@ -1,0 +1,43 @@
+# Audio behavior and implementation
+
+## Ownership and timing
+
+`EchorelleApp` holds a single `JobRepository` for saved definitions/import metadata. `HomeViewModel` performs persistence/import work; Compose consumes StateFlows using lifecycle-aware collection. `PlaybackService` is the only live playback owner. One worker mutates fixed, atomically published voice slots, sample positions and modes. UI lifetimes and visual changes never schedule audio. Definitions contain no running/paused instruction; a new process opens stopped.
+
+The mixer uses 48,000 Hz mono float PCM and integer frame periods. Each Start creates a voice at frame zero. Exact periods wrap directly into the next buffer; intermittent periods contain the chosen natural silence. Different jobs advance independently. Commands apply at a render-block boundary after any partial write completes. Previously queued PCM drains normally; controlling one job never flushes or rewinds the other jobs. Controls therefore have bounded ordinary output-buffer latency, rather than claiming instantaneous speaker response. Nonblocking writes have a three-second stall guard. AudioTrack head wrap is accounted for; cumulative consumption and underruns span output recreations.
+
+Pause freezes a voice cursor. Resume adds a five-millisecond anti-click attack while continuing the same clip/phase. Stop uses a five-millisecond fade then resets. All-paused sessions drain/release AudioTrack, focus and wake lock; the worker sleeps on a semaphore. Stop All also lets the service end. The render loop uses preallocated buffers and fixed indexed slots: no file I/O, decoding, storage calls or per-frame object construction. Imports and diagnostics run elsewhere. Mixing preserves independent gain, with a transparent region below 0.8 and a soft knee toward full scale for overlapping peaks; it does not divide every source by a changing source count.
+
+Platform MediaSession plus the native mediaPlayback foreground service supply system controls and explicit lifecycle management. Retaining this existing path avoids introducing a Media3 Player adapter that would need to invent a single seekable item for independently paused, indefinitely repeating jobs. Media3 is not a completed integration or an omitted background requirement; the implemented platform session handles play/pause/stop and focus. A future interoperability need can justify revisiting the adapter. No Oboe/C++ or extra playback scheduler was introduced.
+
+## Imports and exact duration
+
+The system document picker grants read access. The input is copied into private temporary storage, decoded with MediaExtractor/MediaCodec, and converted to bounded mono PCM. Original source frame count/rate and the normalized 48kHz frame count are stored. Channel averaging and streaming linear sample-rate conversion are explicit initial quality choices. Intentional source silence stays in the clip. Decoder buffers, extractor, streams and temporary files are released on success, failure and cancellation. A final atomic persistence boundary may complete an already decoded import despite a simultaneous cancellation; it never publishes half an asset.
+
+Codec encoder delay/padding are removed once, with those values zeroed in codec configuration to avoid double trimming. AAC/M4A additionally reads integer MP4 audio-track duration and edit-start samples: Android 13 Samsung extraction omitted delay metadata that Android 16 supplied, and both omitted the final AAC packet's padding. The generated regression clip now retains exactly 57,600 frames on both. Eligibility always compares normalized frame counts, not the label or rounded metadata. Android documents [encoder delay and padding as decoded frames to trim](https://developer.android.com/reference/android/media/MediaFormat).
+
+The small bounded MP4 parser accepts a single ordinary audio edit and rejects complex edit lists/non-sample-aligned track durations. Export such files as WAV or FLAC first. Codec support follows the device's installed decoder; DRM, damaged inputs, unsupported channel/PCM formats, stalls and resource violations produce visible ineligible entries. WAV/stereo resampling, MP3 and AAC/M4A have fixture coverage; this is not certification of every container, codec or vendor decoder. Semantic corruption that a platform decoder silently conceals cannot be universally detected. High-rate resampling quality and broader codec fixtures remain release validation work.
+
+Guardrails: 25 MiB input, 60 decoded seconds, 128 MiB persistent PCM, at most 100 import entries/100 jobs. At most four job PCM arrays plus one bounded explicit preview can reside in the mixer; previews are temporary and do not count as saved active jobs. Import processing streams to disk instead of holding another whole source PCM array. These bounds were chosen from predictable frame/memory sizes, not sustained device profiling.
+
+## Persistence and cleanup
+
+A versioned JSON document with a 1 MiB read bound is adequate for the bounded local library; a database framework is unnecessary at this scale. Android AtomicFile protects complete writes. Corrupt/unsupported documents get a local recovery copy and an explanation; audio is retained for recovery. Successful normal loads clean unreferenced/partial assets before advertising readiness. An unused import can be removed; imports referenced by saved or Undo-pending jobs are protected. Disk failures are visible; failed writes do not update UI definitions.
+
+## Visuals and accessibility
+
+All six Canvas designs read current sample phase: strands/knot, folding bird, gathering flower seeds, hopping ink, gently connected stars, and valley/peak folds. Paused shapes freeze, stopped shapes relax; sub-second loops use steady texture. Lazy Home composition restricts rendering to visible cards. Lifecycle-aware state collection stops background UI work, and chooser demonstrations stop when closed or the activity is not started. Demonstrations are silent and have no access to the service. Animator duration scale zero selects static alternatives and is observed for changes.
+
+Selection takes two taps from Home and writes directly to the local document. The chooser has two columns, three rows and scrolling at large text sizes. Control semantics, selected state, non-color playback labels and 48dp Material touch targets support TalkBack. Only state labels are live regions; countdowns are readable on demand and never marked for repeated announcements. The emulator UI flow passed at 200% font scale and reduced motion; a human TalkBack interaction audit remains unverified.
+
+## Smooth interval-progress update — 0.2.1
+
+Visuals now complete a recognizable whole form across the full chosen interval, with duration-adaptive fine work for long intervals (at most eight seconds per work pass). Audio observations carry monotonic timestamps. Refresh-rate Canvas drawing interpolates observed phase with a 150ms stale-observation bound; no audio command, job cursor, cadence or audio worker is driven by that drawing. Paused/interrupted shapes freeze, stopped shapes return to their start, reduced motion uses discrete static poses and sub-second loops use a calm texture.
+
+Project/testing/provisional status and normal engineering commentary were removed from the product UI and prohibited in `AGENTS.md`. This replaces the old always-visible restart note and the provisional/reliability footer; actual errors and useful operational instructions remain. The new progress implementation and cleaned copy are version 0.2.1 (code 5).
+
+## Silent-gap work — 0.2.9
+
+For an entirely silent 480-frame block across all active voices, advance their cursors by 480 and emit zero PCM directly. The block is eligible only when no playing voice is stopping, previewing, in its source samples or crossing its next period boundary. Paused voices remain frozen; ramp bookkeeping matches the reference per-sample path. Behavioral tests compare outputs and state across repeated period boundaries, pauses and resumes. Mixed/audible/fade blocks use the existing mixer. No decoding, allocation, visual preparation or new I/O enters the audio render path.
+
+This reduces mixing work, not the AudioTrack/wake-lock requirement. The app does not currently sleep until a system alarm between cues. The user chose precise intervals and no special alarm prompt; current alarms/Handler limitations and actual emulator CPU observations are recorded in `background-feasibility.md`. No near-zero background power claim is justified.
