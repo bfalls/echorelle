@@ -56,13 +56,8 @@ internal class JobVoice(val job: Job, val pcm: FloatArray, val previewRepeats: I
     var stopping = false
     val period = job.period
     fun rewind(frames: Long) { elapsed = (elapsed - frames).coerceAtLeast(0) }
-    fun canAdvanceSilence(frames: Int): Boolean {
-        if(mode!=JobMode.PLAYING) return true
-        val phase=elapsed%period
-        return !stopping && previewRepeats==0 && phase>=pcm.size && period-phase>=frames
-    }
-    fun advanceSilence(frames: Int) {
-        if(mode==JobMode.PLAYING) { elapsed+=frames;ramp=(ramp+frames).coerceAtMost(240) }
+    fun advanceGap(frames: Long) {
+        if(mode==JobMode.PLAYING) {elapsed+=frames;ramp=(ramp.toLong()+frames).coerceAtMost(240).toInt()}
     }
     fun sample(): Float {
         if (mode != JobMode.PLAYING) return 0f

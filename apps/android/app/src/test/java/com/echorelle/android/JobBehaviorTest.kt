@@ -4,29 +4,6 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class JobBehaviorTest {
-    @Test fun silentBlockAdvanceMatchesSamplesAcrossPauseResumeAndPeriodBoundaries() {
-        val pcm=FloatArray(120){.5f}
-        val job=Job("silence","","",1001,false,1f)
-        val fast=JobVoice(job,pcm)
-        val reference=JobVoice(job,pcm)
-        repeat(300) { block ->
-            val mode=if(block%19==0)JobMode.PAUSED else JobMode.PLAYING
-            fast.mode=mode;reference.mode=mode
-            if(block%31==0){fast.ramp=0;reference.ramp=0}
-            val expected=FloatArray(48){reference.sample()}
-            if(fast.canAdvanceSilence(48)) {
-                assertTrue(expected.all{it==0f})
-                fast.advanceSilence(48)
-            } else for(value in expected)assertEquals(value,fast.sample(),0f)
-            assertEquals(reference.elapsed,fast.elapsed)
-            assertEquals(reference.ramp,fast.ramp)
-            assertEquals(reference.mode,fast.mode)
-        }
-        fast.mode=JobMode.PLAYING;fast.elapsed=200;fast.stopping=true
-        assertFalse(fast.canAdvanceSilence(48))
-        val preview=JobVoice(job,pcm,3).apply{elapsed=200}
-        assertFalse(preview.canAdvanceSilence(48))
-    }
     private val sound = Sound("test", "Fixture", "", 48_001)
     private fun job(period: Long = 5) = Job("a", "A", "test", period, false, 1f)
     @Test fun eligibilityRevalidatesExactFramesAndMatch() {

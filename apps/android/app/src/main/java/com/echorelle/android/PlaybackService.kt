@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
 /** The service owns runtime. UI, persistence and animation never advance the sample timeline. */
 @SuppressLint("WakelockTimeout")
@@ -28,12 +29,24 @@ class PlaybackService : Service() {
         const val RESUME = "com.echorelle.RESUME"
         const val STOP_ALL = "com.echorelle.STOP_ALL"
         const val PREVIEW_ID = "preview"
+        @Volatile private var visibleActivities=0
+        private val uiVisible get()=visibleActivities>0
+        internal fun debugVisibility()="started=$visibleActivities service=${instance?.get()!=null}"
+        @Volatile private var instance: java.lang.ref.WeakReference<PlaybackService>?=null
+        @Synchronized fun activityVisibilityChanged(visible: Boolean) {
+            visibleActivities=(visibleActivities+if(visible)1 else -1).coerceAtLeast(0)
+            instance?.get()?.updates?.trySend(Unit)
+        }
     }
     private data class Command(val action: String, val id: String, val voice: JobVoice? = null, val reason: String = "")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val incoming = Channel<Intent>(32)
     private val commands = ConcurrentLinkedQueue<Command>()
     private val wake = Semaphore(0)
+    private val updates=Channel<Unit>(Channel.CONFLATED)
+    private lateinit var deadlineWake: DeadlineWake
+    @Volatile private var silentGap: SilentGap?=null
+    private var idleStop: kotlinx.coroutines.Job?=null
     private val alive = AtomicBoolean(true)
     private val slots = VoiceSlots()
     private val reasons = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -59,8 +72,17 @@ class PlaybackService : Service() {
     private val noisy = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) { enqueue(Command(PAUSE, "", reason = "Headphones disconnected. Tap Resume.")) }
     }
+    private val environmentChanged=object: BroadcastReceiver() {
+        override fun onReceive(context: Context,intent: Intent) {
+            updates.trySend(Unit)
+            if(intent.action==Intent.ACTION_TIME_CHANGED) {deadlineWake.acquire();wake.release()}
+        }
+    }
     override fun onCreate() {
         super.onCreate()
+        if(BuildConfig.DEBUG)AudioOutputCapture.prepare()
+        instance=java.lang.ref.WeakReference(this)
+        deadlineWake=DeadlineWake(this) {wake.release()}
         audio = getSystemService(AudioManager::class.java)
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("playback", "Playback controls", NotificationManager.IMPORTANCE_LOW))
         session = MediaSession(this, "Echorelle").apply {
@@ -78,19 +100,25 @@ class PlaybackService : Service() {
                 }
             }, Handler(Looper.getMainLooper())).build()
         registerReceiver(noisy, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
+        androidx.core.content.ContextCompat.registerReceiver(this,environmentChanged,IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON);addAction(Intent.ACTION_SCREEN_OFF);addAction(Intent.ACTION_TIME_CHANGED)
+        },androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
         worker = Thread({ stream() }, "EchorelleAudio").apply { start() }
         scope.launch { for (intent in incoming) handle(intent) }
         scope.launch {
-            var tick = 0
+            var nextJournal=0L
             while (isActive) {
                 publish()
-                if (tick++ % 100 == 0 && BuildConfig.DEBUG) {
+                if (SystemClock.elapsedRealtime()>=nextJournal && BuildConfig.DEBUG && journal!=null) {
+                    nextJournal=SystemClock.elapsedRealtime()+10000
                     val fields = environment() + mapOf("rendered_frames" to rendered, "consumed_frames" to consumed,
                         "underruns" to underruns, "jobs" to org.json.JSONObject(playback.value.mapValues { (_, s) ->
                             org.json.JSONObject(mapOf("mode" to s.mode.name, "phase" to s.phase, "frames" to s.frames, "onsets" to s.onsets, "reason" to s.reason)) }))
                     withContext(Dispatchers.IO) { journal?.record("checkpoint", fields) }
                 }
-                delay(100)
+                if(uiVisible && getSystemService(PowerManager::class.java).isInteractive)
+                    withTimeoutOrNull(100) {updates.receive()}
+                else updates.receive()
             }
         }
     }
@@ -158,6 +186,7 @@ class PlaybackService : Service() {
     private fun enqueue(command: Command) {
         if (commands.size >= 32) return
         commands.add(command)
+        deadlineWake.acquire()
         if (wake.availablePermits() == 0) wake.release()
         scope.launch(Dispatchers.IO) { journal?.record("runtime_command", mapOf("action" to command.action, "id" to command.id, "reason" to command.reason)) }
     }
@@ -170,127 +199,191 @@ class PlaybackService : Service() {
 
     private fun stream() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-        val buffer = FloatArray(240)
-        val lock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Echorelle:Playback")
-        var output: AudioTrack? = null
-        var epochRendered = 0L
-        var offset = buffer.size
-        var lastHead = 0L; var headWrap = 0L
-        var consumedBase = 0L
-        var trackUnderruns = 0
-        var lastProgress = SystemClock.elapsedRealtime()
+        val buffer=FloatArray(240)
+        var output: AudioTrack?=null
+        var trackPlaying=false
+        var epochRendered=0L
+        var offset=buffer.size
+        var lastHead=0L;var headWrap=0L
+        var consumedBase=0L
+        var timelineFrame=0L
+        var clock: GapClock?=null
+        var trackUnderruns=0
+        var lastProgress=SystemClock.elapsedRealtime()
+        var nextBackgroundPublish=0L
         fun head(): Long {
-            val value = (output?.playbackHeadPosition?.toLong() ?: 0) and 0xffffffffL
-            if (value < lastHead) headWrap += 1L shl 32
-            lastHead = value
-            return value + headWrap
+            val value=(output?.playbackHeadPosition?.toLong()?:0) and 0xffffffffL
+            if(value<lastHead)headWrap+=1L shl 32
+            lastHead=value
+            return value+headWrap
+        }
+        fun closeOutput() {
+            if(output!=null) {consumedBase+=head();consumed=consumedBase;output?.release()}
+            output=null;trackPlaying=false;queuedFrames=0;epochRendered=0;lastHead=0;headWrap=0;offset=buffer.size
+            if(BuildConfig.DEBUG)PlaybackWorkStats.outputOpen=false
+        }
+        fun prepareOutput() {
+            if(output!=null)return
+            val minimum=AudioTrack.getMinBufferSize(SAMPLE_RATE,AudioFormat.CHANNEL_OUT_MONO,AudioFormat.ENCODING_PCM_FLOAT)
+            check(minimum>0){"48 kHz audio output unavailable."}
+            output=AudioTrack.Builder().setAudioAttributes(attributes).setAudioFormat(AudioFormat.Builder()
+                .setSampleRate(SAMPLE_RATE).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).setEncoding(AudioFormat.ENCODING_PCM_FLOAT).build())
+                .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(maxOf(minimum,3840)).build()
+            check(output?.state==AudioTrack.STATE_INITIALIZED)
+            if(BuildConfig.DEBUG)PlaybackWorkStats.outputOpen=true
+            trackUnderruns=0
+        }
+        fun leaveGap(atDeadline: Boolean) {
+            val gap=silentGap?:return
+            val delta=if(atDeadline)gap.end-gap.start else gap.advanceAt(SystemClock.elapsedRealtimeNanos())
+            for(n in slots.indices)slots[n]?.advanceGap(delta)
+            timelineFrame+=delta;silentGap=null
+            deadlineWake.cancel();deadlineWake.acquire()
+            if(BuildConfig.DEBUG) {PlaybackWorkStats.waiting=false;PlaybackWorkStats.alarmScheduled=false}
+            updates.trySend(Unit)
+        }
+        fun nextSound(): Long {
+            var distance=Long.MAX_VALUE
+            for(n in slots.indices)slots[n]?.let { v ->
+                if(v.mode==JobMode.PLAYING) {
+                    val phase=v.elapsed%v.period
+                    val next=if(v.stopping || v.previewRepeats>0 || phase<v.pcm.size)0L else v.period-phase
+                    distance=minOf(distance,next)
+                }
+            }
+            return distance
         }
         try {
-            while (alive.get()) {
-                if (commands.isNotEmpty() && offset == buffer.size) {
+            while(alive.get()) {
+                if(commands.isNotEmpty() && offset==buffer.size) {
+                    leaveGap(false)
                     wake.tryAcquire()
-                    // Commands change the next render block; another job's queued PCM is never flushed.
-                    while (true) {
-                        val c = commands.poll() ?: break
-                        if (c.action == START) {
-                            val old = slots.indexOfFirst { it?.job?.id == c.id }
-                            if (old >= 0 && c.id != PREVIEW_ID && slots[old]?.mode != JobMode.STOPPED && slots[old]?.mode != JobMode.ERROR) continue
-                            val empty = slots.indexOfFirst { it == null || it.mode == JobMode.STOPPED || it.mode == JobMode.ERROR }
-                            val index = if (old >= 0) old else empty
-                            val count = slots.count { it != null && it.job.id != PREVIEW_ID && it.mode != JobMode.STOPPED && it.mode != JobMode.ERROR }
-                            if (index >= 0 && (c.id == PREVIEW_ID || old >= 0 || count < MAX_ACTIVE)) {
-                                slots[index] = c.voice; reasons.remove(c.id)
-                            } else reasons[c.id] = "Four jobs are already active. Stop one first."
-                        } else for (n in slots.indices) slots[n]?.let { v ->
-                            if (c.id.isEmpty() || c.id == v.job.id || c.action == STOP_ALL) {
-                                when (c.action) {
-                                    PAUSE -> if (v.mode == JobMode.PLAYING) {
-                                        v.mode = if (c.reason.isEmpty()) JobMode.PAUSED else JobMode.INTERRUPTED
-                                        if (v.job.id == PREVIEW_ID) { v.mode = JobMode.STOPPED; v.elapsed = 0 }
-                                        reasons[v.job.id] = c.reason
-                                    }
-                                    RESUME -> if (v.mode == JobMode.PAUSED || v.mode == JobMode.INTERRUPTED) { v.mode = JobMode.PLAYING; v.ramp = 0; reasons.remove(v.job.id) }
-                                    STOP, STOP_ALL -> { v.stopping = v.mode == JobMode.PLAYING; v.ramp = 0
-                                        if (!v.stopping) { v.mode = JobMode.STOPPED; v.elapsed = 0 }; reasons.remove(v.job.id) }
+                    while(true) {
+                        val c=commands.poll()?:break
+                        if(c.action==START) {
+                            val old=slots.indexOfFirst{it?.job?.id==c.id}
+                            if(old>=0 && c.id!=PREVIEW_ID && slots[old]?.mode!=JobMode.STOPPED && slots[old]?.mode!=JobMode.ERROR)continue
+                            val empty=slots.indexOfFirst{it==null || it.mode==JobMode.STOPPED || it.mode==JobMode.ERROR}
+                            val index=if(old>=0)old else empty
+                            val count=slots.count{it!=null && it.job.id!=PREVIEW_ID && it.mode!=JobMode.STOPPED && it.mode!=JobMode.ERROR}
+                            if(index>=0 && (c.id==PREVIEW_ID || old>=0 || count<MAX_ACTIVE)) {slots[index]=c.voice;reasons.remove(c.id)}
+                            else reasons[c.id]="Four jobs are already active. Stop one first."
+                        } else for(n in slots.indices)slots[n]?.let { v ->
+                            if(c.id.isEmpty() || c.id==v.job.id || c.action==STOP_ALL)when(c.action) {
+                                PAUSE -> if(v.mode==JobMode.PLAYING) {
+                                    v.mode=if(c.reason.isEmpty())JobMode.PAUSED else JobMode.INTERRUPTED
+                                    if(v.job.id==PREVIEW_ID){v.mode=JobMode.STOPPED;v.elapsed=0}
+                                    reasons[v.job.id]=c.reason
+                                }
+                                RESUME -> if(v.mode==JobMode.PAUSED || v.mode==JobMode.INTERRUPTED){v.mode=JobMode.PLAYING;v.ramp=0;reasons.remove(v.job.id)}
+                                STOP,STOP_ALL -> {
+                                    v.stopping=v.mode==JobMode.PLAYING && v.elapsed%v.period<v.pcm.size;v.ramp=0
+                                    if(!v.stopping){v.mode=JobMode.STOPPED;v.elapsed=0};reasons.remove(v.job.id)
                                 }
                             }
                         }
                     }
-
-
+                    updates.trySend(Unit)
                 }
-                if (slots.none { it?.mode == JobMode.PLAYING }) {
-                    if (output != null && head() < epochRendered) {
-                        check(SystemClock.elapsedRealtime() - lastProgress < 3000) { "Audio output stopped consuming frames." }
-                        Thread.sleep(2); continue
+                if(slots.none{it?.mode==JobMode.PLAYING}) {
+                    if(output!=null && trackPlaying && head()<epochRendered) {
+                        check(SystemClock.elapsedRealtime()-lastProgress<3000){"Audio output stopped consuming frames."}
+                        Thread.sleep(2);continue
                     }
-                    if (output != null) { consumedBase += head(); consumed = consumedBase }
-                    output?.release(); output = null; queuedFrames = 0; epochRendered = 0; lastHead = 0; headWrap = 0; offset = buffer.size
-                    if (lock.isHeld) lock.release()
-                    wake.acquire(); continue
+                    closeOutput();clock=null;deadlineWake.cancel();deadlineWake.release()
+                    if(BuildConfig.DEBUG){PlaybackWorkStats.waiting=false;PlaybackWorkStats.alarmScheduled=false}
+                    updates.trySend(Unit);wake.acquire();continue
                 }
-                if (output == null) {
-                    val minimum = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
-                    check(minimum > 0) { "48 kHz audio output unavailable." }
-                    output = AudioTrack.Builder().setAudioAttributes(attributes).setAudioFormat(AudioFormat.Builder()
-                        .setSampleRate(SAMPLE_RATE).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).setEncoding(AudioFormat.ENCODING_PCM_FLOAT).build())
-                        .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(maxOf(minimum, 3840)).build()
-                    check(output.state == AudioTrack.STATE_INITIALIZED)
-                    lock.acquire(); output.play()
-                    trackUnderruns = 0
-                    lastProgress = SystemClock.elapsedRealtime()
-                }
-                if (offset == buffer.size) {
-                    // Skip per-sample mixing only when every voice's entire block is silent.
-                    // Cursors advance by the same exact frame count; PCM output still clocks it.
-                    var silent=true
-                    for(n in slots.indices) {
-                        val voice=slots[n]
-                        if(voice!=null && !voice.canAdvanceSilence(buffer.size)) { silent=false;break }
+                if(clock==null)clock=GapClock(SystemClock.elapsedRealtimeNanos()-GapClock(0).nanosAt(timelineFrame))
+                val gap=silentGap
+                if(gap!=null) {
+                    val now=SystemClock.elapsedRealtimeNanos()
+                    if(now>=gap.deadline) {
+                        val late=now-gap.deadline
+                        leaveGap(true)
+                        // Preserve normal absolute deadlines. After a major device stall, rebase
+                        // once rather than replaying missed intervals as a burst of sounds.
+                        if(late>1_000_000_000L)clock.originNanos+=late
+                        if(BuildConfig.DEBUG)PlaybackWorkStats.lastLatenessNanos=late
+                        continue
                     }
-                    if(silent) {
-                        buffer.fill(0f)
-                        for(n in slots.indices) slots[n]?.advanceSilence(buffer.size)
+                    if(now<gap.prepareAt) {
+                        val armed=deadlineWake.schedule(gap.prepareAt)
+                        if(BuildConfig.DEBUG){PlaybackWorkStats.waiting=true;PlaybackWorkStats.alarmScheduled=armed}
+                        updates.trySend(Unit)
+                        if(armed)deadlineWake.release() else deadlineWake.acquire()
+                        val remaining=gap.prepareAt-SystemClock.elapsedRealtimeNanos()
+                        if(remaining>0)wake.tryAcquire(remaining,TimeUnit.NANOSECONDS)
+                        deadlineWake.acquire();deadlineWake.cancel()
+                        if(BuildConfig.DEBUG)PlaybackWorkStats.alarmScheduled=false
                     } else {
-                    for (i in buffer.indices) {
-                        var sum = 0f
-                        for (n in slots.indices) { val voice = slots[n]; if (voice != null) sum += voice.sample() }
-                        // Transparent below 0.8; a continuous soft knee bounds overlapping peaks.
-                        val magnitude = kotlin.math.abs(sum)
-                        buffer[i] = if (magnitude <= .8f) sum else {
-                            val excess = magnitude - .8f
-                            kotlin.math.sign(sum) * (.8f + .2f * excess / (excess + .2f))
+                        deadlineWake.acquire();prepareOutput()
+                        val remaining=gap.deadline-SystemClock.elapsedRealtimeNanos()
+                        if(remaining>0)wake.tryAcquire(remaining,TimeUnit.NANOSECONDS)
+                    }
+                    continue
+                }
+                val distance=nextSound()
+                // Match and short gaps keep the existing sample-continuous mixed stream.
+                if(offset==buffer.size && distance>=5L*SAMPLE_RATE && distance!=Long.MAX_VALUE) {
+                    if(output!=null && trackPlaying && head()<epochRendered) {
+                        val played=head();consumed=consumedBase+played;queuedFrames=(epochRendered-played).coerceAtLeast(0)
+                        check(SystemClock.elapsedRealtime()-lastProgress<3000){"Audio output stopped consuming frames."}
+                        Thread.sleep(2);continue
+                    }
+                    closeOutput();silentGap=SilentGap(timelineFrame,timelineFrame+distance,clock,LongArray(5){slots[it]?.elapsed?:0})
+                    updates.trySend(Unit);continue
+                }
+                prepareOutput()
+                if(!trackPlaying) {
+                    deadlineWake.acquire()
+                    output!!.play();trackPlaying=true;lastProgress=SystemClock.elapsedRealtime()
+                    if(BuildConfig.DEBUG)AudioOutputCapture.segmentStarted(SystemClock.elapsedRealtimeNanos())
+                    updates.trySend(Unit)
+                }
+                if(offset==buffer.size) {
+                    for(i in buffer.indices) {
+                        var sum=0f
+                        for(n in slots.indices)slots[n]?.let{sum+=it.sample()}
+                        val magnitude=kotlin.math.abs(sum)
+                        buffer[i]=if(magnitude<=.8f)sum else {
+                            val excess=magnitude-.8f
+                            kotlin.math.sign(sum)*(.8f+.2f*excess/(excess+.2f))
                         }
                     }
-                    }
-                    epochRendered += buffer.size; rendered += buffer.size; offset = 0
+                    epochRendered+=buffer.size;timelineFrame+=buffer.size;rendered+=buffer.size;offset=0
                 }
-                val written = output.write(buffer, offset, buffer.size - offset, AudioTrack.WRITE_NON_BLOCKING)
-                check(written >= 0) { "Audio output error $written" }
-                if (written > 0) lastProgress = SystemClock.elapsedRealtime()
-                else check(SystemClock.elapsedRealtime() - lastProgress < 3000) { "Audio output stalled." }
-                offset += written
-                val played = head()
-                consumed = consumedBase + played
-                queuedFrames = (epochRendered - played).coerceAtLeast(0)
-                val observedUnderruns = output.underrunCount
-                underruns += (observedUnderruns - trackUnderruns).coerceAtLeast(0)
-                trackUnderruns = observedUnderruns
-                if (written == 0) Thread.sleep(2)
+                val written=output!!.write(buffer,offset,buffer.size-offset,AudioTrack.WRITE_NON_BLOCKING)
+                check(written>=0){"Audio output error $written"}
+                if(BuildConfig.DEBUG && written>0){AudioOutputCapture.accepted(buffer,offset,written);PlaybackWorkStats.submitted.addAndGet(written.toLong())}
+                if(written>0)lastProgress=SystemClock.elapsedRealtime()
+                else check(SystemClock.elapsedRealtime()-lastProgress<3000){"Audio output stalled."}
+                offset+=written
+                val played=head();consumed=consumedBase+played;queuedFrames=(epochRendered-played).coerceAtLeast(0)
+                val observed=output!!.underrunCount;underruns+=(observed-trackUnderruns).coerceAtLeast(0);trackUnderruns=observed
+                if(SystemClock.elapsedRealtime()>=nextBackgroundPublish){nextBackgroundPublish=SystemClock.elapsedRealtime()+1000;updates.trySend(Unit)}
+                if(written==0)Thread.sleep(2)
             }
-        } catch (_: InterruptedException) {
-            // Service teardown only; definitions never automatically restart.
-        } catch (e: Exception) {
-            for (n in slots.indices) slots[n]?.let { it.mode = JobMode.ERROR; reasons[it.job.id] = e.message ?: "Audio output failed." }
+        } catch(_: InterruptedException) {
+            // Service teardown; definitions do not restart automatically.
+        } catch(e: Exception) {
+            for(n in slots.indices)slots[n]?.let{it.mode=JobMode.ERROR;reasons[it.job.id]=e.message?:"Audio output failed."}
+            updates.trySend(Unit)
         } finally {
-            try { output?.release() } finally { if (lock.isHeld) lock.release() }
+            silentGap=null
+            try {closeOutput()} finally {deadlineWake.cancel();deadlineWake.release()}
+            if(BuildConfig.DEBUG){PlaybackWorkStats.waiting=false;PlaybackWorkStats.alarmScheduled=false}
         }
     }
     @OptIn(ExperimentalCoroutinesApi::class)
     private fun publish() {
+        if(BuildConfig.DEBUG)PlaybackWorkStats.publications.incrementAndGet()
         val snapshots = mutableMapOf<String, JobPlayback>()
         for (n in slots.indices) slots[n]?.let { v ->
-            val frames = if (v.mode == JobMode.PLAYING) (v.elapsed - queuedFrames).coerceAtLeast(0) else v.elapsed
+            val gap=silentGap
+            // Use the gap's captured base, even if the worker completes that gap concurrently.
+            val frames = if(v.mode==JobMode.PLAYING && gap!=null) gap.voiceBases[n]+gap.advanceAt(SystemClock.elapsedRealtimeNanos())
+                else if (v.mode == JobMode.PLAYING) (v.elapsed - queuedFrames).coerceAtLeast(0) else v.elapsed
             snapshots[v.job.id] = JobPlayback(v.mode, frames % v.period, frames, reasons[v.job.id] ?: "", if (frames == 0L) 0 else (frames - 1) / v.period + 1,
                 if (v.mode == JobMode.PLAYING) SystemClock.elapsedRealtimeNanos() else 0, v.visualSeed)
         }
@@ -303,10 +396,10 @@ class PlaybackService : Service() {
             if (foreground) { stopForeground(STOP_FOREGROUND_DETACH); foreground = false }
             if (receivedCommand && snapshots.values.none { it.mode == JobMode.PAUSED || it.mode == JobMode.INTERRUPTED || it.mode == JobMode.ERROR }) {
                 if (idleSince == 0L) idleSince = SystemClock.elapsedRealtime()
-                if (SystemClock.elapsedRealtime() - idleSince > 1500) stopSelf()
+                if(idleStop==null)idleStop=scope.launch {delay(1500);if(!handling && slots.none{it!=null && it.mode!=JobMode.STOPPED})stopSelf()}
             }
         } else {
-            idleSince = 0L
+            idleSince = 0L;idleStop?.cancel();idleStop=null
         }
         if (playing != lastPlaying) {
             session.setPlaybackState(PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_STOP)
@@ -331,6 +424,8 @@ class PlaybackService : Service() {
             "reason" to "service_destroyed", "audible_output_verified" to false)
         Thread({ recorder?.record("session_end", summary) }, "EchorelleJournalClose").start()
         alive.set(false); worker?.interrupt(); scope.cancel(); incoming.close()
+        deadlineWake.close();updates.close();if(instance?.get()===this)instance=null
+        unregisterReceiver(environmentChanged)
         focus?.let { audio.abandonAudioFocusRequest(it) }; unregisterReceiver(noisy); session.release()
         mutable.value = emptyMap(); stopForeground(STOP_FOREGROUND_REMOVE)
         // No PCM files or jobs are removed here.

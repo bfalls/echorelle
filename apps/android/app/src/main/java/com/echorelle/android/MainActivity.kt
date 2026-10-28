@@ -2,6 +2,7 @@ package com.echorelle.android
 
 import android.Manifest
 import android.content.Intent
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -36,6 +37,8 @@ class MainActivity : ComponentActivity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Volume keys must adjust our media stream even between cues or before Preview.
+        volumeControlStream = AudioManager.STREAM_MUSIC
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
                 Surface(Modifier.fillMaxSize()) { Home { action, id, sound, repeats, soften, volume ->
@@ -53,10 +56,12 @@ class MainActivity : ComponentActivity() {
         } else startForegroundService(intent)
     }
     override fun onStop() {
+        PlaybackService.activityVisibilityChanged(false)
         super.onStop(); pendingPlayback = null
         if (PlaybackService.playback.value[PlaybackService.PREVIEW_ID]?.mode == JobMode.PLAYING)
             startService(Intent(this, PlaybackService::class.java).setAction(PlaybackService.STOP).putExtra("id", PlaybackService.PREVIEW_ID))
     }
+    override fun onStart() {super.onStart();PlaybackService.activityVisibilityChanged(true)}
 }
 private typealias Play = (String, String, String, Int, Boolean, Float) -> Unit
 

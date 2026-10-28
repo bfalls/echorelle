@@ -5,7 +5,19 @@ status: ready-for-full-android-build
 
 # Echorelle — Android build handoff
 
-## Current build — 0.3.2, atmospheric stained glass
+## Current build — 0.4.0, sleeping audio gaps
+
+Implemented the requested low-power waiting design. Match and short all-mix gaps stay continuous. Gaps of at least five seconds close AudioTrack; the worker blocks until one-second-early preparation and the absolute sound deadline. An eligible earliest timer alarm releases the app wake lock; unavailable exact access retains it while blocking. No special alarm permission prompt. Android can show its normal upcoming-alarm indicator and keep full Doze away from an imminent timer. Hidden UI updates block; all visual work remains gated. Read `docs/audio-scheduling.md` before changing timing/permissions.
+
+Final checks: 37 JVM tests, debug/test APK builds, lint zero errors/18 warnings. Four sleeping/runtime tests passed together in 36.687s. Final accepted-output repeat test passed in 34.274s: four clips/80,640 submitted frames, no gap PCM, native session spacing 9.9492/10.0001/9.9991s; Windows speaker measurements also captured four ten-second-spaced dings. Final two-second hidden-gap sample: 22ms process CPU, zero writes/publications/visual work, output closed, app wake lock released. Forced idle was requested but Android stayed INACTIVE; the next sound played after 14.9735s. Do not call that a forced-Doze pass or phone battery measurement. See `docs/review.md` and `docs/background-feasibility.md` for exact coverage and remaining limits.
+
+Saved library byte-identical; installed in place and reopened on emulator. APK 0.4.0/code 17 SHA256 `4189D111676FC4D627B1B647F1369394EBF2DC6E73AB0F886279D4D3E805BC20`. Initial commit 2394cc8364a7 was approved and pushed; all later changes, including this design, remain uncommitted. Never reuse that approval for another commit.
+
+## Previous diagnostic — 2026-10-27, post-sleep emulator audio
+
+The reported missing repeats were reproduced at Windows speaker output while actual submitted app PCM contained all four ten-second dings. Cold-booting the same emulator restored all four sounds; the user confirmed each interval was audible. Android Studio was left running. Saved jobs/preferences survived unchanged. Repeat scheduling was not altered. Added an opt-in debug accepted-output test/buffer; diagnostics and caveats are in docs/background-feasibility.md under the 2026-10-27 heading. These new diagnostic/documentation changes are uncommitted; initial commit 2394cc8364a7 was already pushed with user approval. Original build notes below are historical validation.
+
+## Previous build — 0.3.2, atmospheric stained glass
 
 Stained glass is now a third global Visual choice. The first three original classic-style artworks are Magnolia (below 3min), Iris garden (3min–under 15min), and River of light (15min+). Realistic-looking opalescent/rippled glass and lead texture comes from generated original bitmap assets, with image-derived pane outlines; no museum photos are bundled. Arrivals average approximately 2.5 seconds, follow curved paths from outside the canvas, and bank gently into place. Short intervals assemble grouped sections; longer ones subdivide source regions. Finish up to five seconds early, then gently increase transmitted light. The faint surrounding haze, colored floor glow and beams observe playback phase. The artwork itself stays clear. Below five seconds is static; reduced motion suppresses flight/drift. Existing Origami/Cube preferences, audio scheduling and permissions are unchanged. Origami's rejected appearance is not claimed fixed.
 
